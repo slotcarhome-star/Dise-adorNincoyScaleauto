@@ -18,7 +18,10 @@
             "three": "https://esm.sh/three@0.161.0",
             "@react-three/fiber": "https://esm.sh/@react-three/fiber@8.15.16?external=react,react-dom,three",
             "@react-three/drei": "https://esm.sh/@react-three/drei@9.99.0?external=react,react-dom,three,@react-three/fiber",
-            "lucide-react": "https://esm.sh/lucide-react@0.344.0?external=react"
+            "lucide-react": "https://esm.sh/lucide-react@0.344.0?external=react",
+            "three/examples/jsm/loaders/OBJLoader": "https://esm.sh/three@0.161.0/examples/jsm/loaders/OBJLoader.js",
+            "three/examples/jsm/loaders/MTLLoader": "https://esm.sh/three@0.161.0/examples/jsm/loaders/MTLLoader.js",
+            "idb-keyval": "https://esm.sh/idb-keyval@6.2.1"
         }
     }
     </script>
@@ -39,6 +42,9 @@
         .btn-tile { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 6px; background-color: #2d3748; border: 1px solid #4a5568; transition: all 0.1s; height: 55px; min-width: 55px; cursor: pointer; user-select: none; flex-shrink: 0; }
         .btn-tile:hover { background-color: #4a5568; border-color: #a0aec0; transform: translateY(-1px); }
         .btn-tile:active { transform: scale(0.95); }
+        .btn-tile.active-tool { background-color: #166534; border-color: #22c55e; color: white; }
+        .btn-tile.active-tool .btn-label { color: white; }
+        
         .btn-label { font-size: 10px; font-weight: 700; text-transform: uppercase; margin-top: 3px; color: #cbd5e0; }
         .btn-tile:hover .btn-label { color: #fff; }
         .btn-new-circuit { display: flex; flex-direction: column; align-items: center; justify-content: center; background: #1e3a8a; border: 1px solid #3b82f6; color: white; border-radius: 6px; height: 55px; padding: 0 10px; cursor: pointer; min-width: 80px; }
@@ -102,6 +108,9 @@
         .animate-slide-up { animation: slide-up 0.3s ease-out forwards; }
         .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
 
+        /* Error Overlay Style */
+        #error-overlay { display: none; position: fixed; inset: 0; background: #0f0f13; color: #ef4444; z-index: 9999; padding: 20px; font-family: monospace; overflow: auto; }
+
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: #1e293b; }
         ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
@@ -116,13 +125,31 @@
 </head>
 <body>
     <div id="root"></div>
+    <div id="error-overlay">
+        <h2 style="font-size: 24px; font-weight: bold; margin-bottom: 10px;">Error de Inicio</h2>
+        <p>Hubo un problema al cargar la aplicación. Esto suele ocurrir si la red bloquea las librerías CDN.</p>
+        <pre id="error-message" style="background: #1e1e1e; padding: 10px; border-radius: 5px; margin-top: 10px; color: #f87171; white-space: pre-wrap;"></pre>
+    </div>
+
+    <script>
+        window.onerror = function(message, source, lineno, colno, error) {
+            const overlay = document.getElementById('error-overlay');
+            const msgBox = document.getElementById('error-message');
+            overlay.style.display = 'block';
+            msgBox.textContent = `${message}\n\nEn: ${source}:${lineno}:${colno}`;
+            console.error(error);
+        };
+    </script>
 
     <script type="text/babel" data-type="module">
-        import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+        import React, { useState, useMemo, useRef, useEffect, useCallback, Suspense } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { Canvas, useThree, useFrame } from '@react-three/fiber';
+        import { Canvas, useThree, useFrame, useLoader } from '@react-three/fiber';
         import { OrbitControls, PerspectiveCamera, Environment, Center, Line, Text, Grid } from '@react-three/drei';
         import * as THREE from 'three';
+        import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader';
+        import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader';
+        import { get, set } from 'idb-keyval'; 
         import { 
             Trash2, Undo2, ArrowLeftRight, RotateCcw, Zap, Ruler, Lock, Unlock, Move, 
             RotateCw, Scan, FileText, Printer, ArrowLeft, Droplet, FileDown, Home, 
@@ -130,7 +157,8 @@
             Flag, Timer, Trophy, Check, Battery, Disc, PenTool, LayoutTemplate, 
             ZoomIn, ZoomOut, ArrowUp, ArrowDown, ArrowRight, X, Minus, Weight,
             Bot, User, Activity, StopCircle, RefreshCw, Clock, Save, FolderOpen,
-            Move3d, MousePointer2
+            Move3d, MousePointer2, PlayCircle, StopCircle as StopIcon, Truck, History, Upload, FileBox,
+            Database
         } from 'lucide-react';
 
         // --- SISTEMAS DE PISTA ---
@@ -164,6 +192,12 @@
         };
 
         const MAGNET_FORCE = 25.0; 
+        
+        // --- COCHES DISPONIBLES (BASE) ---
+        const CAR_MODELS = [
+            { id: 'std', name: 'Coche Slot', type: 'STD', description: 'Modelo Básico' }
+        ];
+
         const INITIAL_MOTORS = [
             { id: 'nc8', name: 'NC-8 Thruster', rpm: 16000, torque: 0.8, color: '#fbbf24' },
             { id: 'nc5', name: 'NC-5 Speeder', rpm: 20000, torque: 1.0, color: '#ef4444' },
@@ -226,9 +260,8 @@
 
         // --- COMPONENTE DE LÍNEA DE META ---
         const FinishLine = ({ width }) => {
-            // Checkered pattern geometry
             const rows = 2; 
-            const size = 1.8; // Square size
+            const size = 1.8; 
             const cols = Math.floor((width - 1) / size);
             const startZ = -(cols * size) / 2;
             const TRACK_H = 0.6;
@@ -252,7 +285,6 @@
             return (
                 <group position={[2, TRACK_H + 0.02, 0]}>
                     {squares}
-                    {/* Línea blanca fina antes y después para resaltar */}
                     <mesh position={[-0.2, 0, 0]} rotation={[-Math.PI/2, 0, 0]}>
                         <planeGeometry args={[0.2, width]} />
                         <meshBasicMaterial color="white" />
@@ -261,8 +293,6 @@
                         <planeGeometry args={[0.2, width]} />
                         <meshBasicMaterial color="white" />
                     </mesh>
-                    
-                    {/* Texto META */}
                     <Text position={[rows * size + 3.5, 0, 0]} rotation={[-Math.PI/2, 0, -Math.PI/2]} fontSize={2.5} color="white" fontWeight="bold" letterSpacing={0.1}>
                         META
                     </Text>
@@ -276,49 +306,122 @@
         const createStraightShape = (len, width) => { const s = new THREE.Shape(); s.moveTo(0,-width/2); s.lineTo(len,-width/2); s.lineTo(len,width/2); s.lineTo(0,width/2); return s; };
         const createCurveShape = (r, deg, isLeft, width) => { const s = new THREE.Shape(); const inner = r - width/2; const outer = r + width/2; const start = isLeft ? -Math.PI/2 : Math.PI/2; const rad = (deg * Math.PI)/180; const end = isLeft ? start + rad : start - rad; s.absarc(0,0, outer, start, end, !isLeft); s.lineTo(Math.cos(end)*inner, Math.sin(end)*inner); s.absarc(0,0, inner, end, start, isLeft); return s; };
 
-        const CarModel = ({ color = "#dc2626" }) => {
-            const rWheel = 1.05;
-            const wWheel = 0.9;
+        // --- MODELO COCHE BÁSICO (ESCALA 1:32 AUMENTADA) ---
+        const Wheel = ({ pos, radius = 1.1, width = 1.0, spokes = false, color = "#1a1a1a", rimColor = "#e2e8f0" }) => (
+             <group position={pos}>
+                <mesh rotation={[Math.PI/2, 0, 0]} castShadow>
+                    <cylinderGeometry args={[radius, radius, width, 32]} />
+                    <meshStandardMaterial color="#1a1a1a" roughness={0.9} />
+                </mesh>
+                <mesh rotation={[Math.PI/2, 0, 0]} position={[0, 0, 0]}>
+                    <cylinderGeometry args={[radius * 0.65, radius * 0.65, width + 0.05, 16]} />
+                    <meshStandardMaterial color={rimColor} metalness={0.8} roughness={0.2} />
+                </mesh>
+                <mesh rotation={[Math.PI/2, 0, 0]} position={[0, 0, width/2 + 0.05]}>
+                    <cylinderGeometry args={[0.15, 0.15, 0.1, 6]} />
+                    <meshStandardMaterial color={color} metalness={0.5} />
+                </mesh>
+            </group>
+        );
+
+        const StandardCar = ({ color }) => (
+            <group position={[0, 1.5, 0]}> {/* Higher center due to larger wheels */}
+                {/* Cuerpo Aumentado */}
+                <mesh position={[0, 1.2, 0]} castShadow receiveShadow>
+                    <boxGeometry args={[13.5, 2.4, 6.0]} /> {/* Scaled ~x3 for 1:32 feel */}
+                    <meshStandardMaterial color={color} metalness={0.4} roughness={0.3} />
+                </mesh>
+                {/* Cabina */}
+                <mesh position={[-1.5, 2.7, 0]} castShadow>
+                    <boxGeometry args={[6.0, 1.5, 4.8]} /> 
+                    <meshStandardMaterial color="#111" metalness={0.8} />
+                </mesh>
+                {/* Wheels - Adjusted positions for new scale */}
+                <Wheel pos={[4.5, 0, 3.1]} radius={2.1} width={1.2} /> 
+                <Wheel pos={[4.5, 0, -3.1]} radius={2.1} width={1.2} /> 
+                <Wheel pos={[-4.5, 0, 3.1]} radius={2.2} width={1.5} /> 
+                <Wheel pos={[-4.5, 0, -3.1]} radius={2.2} width={1.5} /> 
+                
+                {/* Alerón */}
+                <mesh position={[-6.6, 3.0, 0]}><boxGeometry args={[1.5, 0.3, 6.0]} /><meshStandardMaterial color={color}/></mesh>
+            </group>
+        );
+
+        // --- COMPONENTE COCHE PERSONALIZADO ---
+        const CustomCar = ({ objUrl, mtlUrl, color }) => {
+            const [model, setModel] = useState(null);
+            
+            useEffect(() => {
+                if (!objUrl) {
+                    setModel(null);
+                    return;
+                }
+                
+                const loadModel = async () => {
+                    try {
+                        let materials = null;
+                        if (mtlUrl) {
+                            const mtlLoader = new MTLLoader();
+                            materials = await mtlLoader.loadAsync(mtlUrl);
+                            materials.preload();
+                        }
+                        
+                        const objLoader = new OBJLoader();
+                        if (materials) {
+                            objLoader.setMaterials(materials);
+                        }
+                        const obj = await objLoader.loadAsync(objUrl);
+                        
+                        const box = new THREE.Box3().setFromObject(obj);
+                        const size = new THREE.Vector3();
+                        box.getSize(size);
+                        
+                        // Escalado 1:32 Aumentado
+                        const TARGET_LENGTH = 13.5;
+                        const maxDim = Math.max(size.x, size.y, size.z);
+                        const scale = TARGET_LENGTH / maxDim;
+                        obj.scale.setScalar(scale);
+                        
+                        box.setFromObject(obj);
+                        box.getCenter(obj.position);
+                        obj.position.multiplyScalar(-1);
+                        
+                        obj.position.y += (size.y * scale) / 2;
+                        
+                        if (!mtlUrl) {
+                            obj.traverse((child) => {
+                                if (child.isMesh) {
+                                    child.material.color.set(color);
+                                }
+                            });
+                        }
+                        
+                        // Rotación base corregida
+                        obj.rotation.y = -Math.PI / 2; 
+
+                        setModel(obj);
+                    } catch (e) {
+                        console.error("Error loading custom model", e);
+                        setModel(null); // Fallback to standard
+                    }
+                };
+                loadModel();
+            }, [objUrl, mtlUrl, color]);
+
+            if (!model) return <StandardCar color={color} />; 
+            
             return (
-                <group>
-                    <mesh position={[0, 0.05, 0]} rotation={[-Math.PI/2, 0, 0]}>
-                        <planeGeometry args={[11, 6]} />
-                        <meshBasicMaterial color="black" opacity={0.4} transparent />
-                    </mesh>
-                    {[ [3.2, 2.6], [3.2, -2.6], [-3.2, 2.7], [-3.2, -2.7] ].map((pos, i) => (
-                        <group key={i} position={[pos[0], rWheel, pos[1]]}>
-                            <mesh rotation={[Math.PI/2, 0, 0]} castShadow>
-                                <cylinderGeometry args={[rWheel, rWheel, wWheel, 32]} />
-                                <meshStandardMaterial color="#1a1a1a" roughness={0.9} />
-                            </mesh>
-                            <mesh rotation={[Math.PI/2, 0, 0]} position={[0, 0, pos[1]>0 ? 0.1 : -0.1]}>
-                                <cylinderGeometry args={[rWheel*0.65, rWheel*0.65, wWheel, 16]} />
-                                <meshStandardMaterial color="#e2e8f0" metalness={0.8} roughness={0.2} />
-                            </mesh>
-                        </group>
-                    ))}
-                    <group position={[0, 0.6, 0]}>
-                        <mesh position={[0, 1.2, 0]} scale={[5, 1, 2.2]} castShadow receiveShadow>
-                            <sphereGeometry args={[1, 48, 24]} />
-                            <meshStandardMaterial color={color} metalness={0.6} roughness={0.2} />
-                        </mesh>
-                        <mesh position={[-0.5, 1.8, 0]} scale={[1.8, 0.8, 1.4]}>
-                            <sphereGeometry args={[1, 32, 24]} />
-                            <meshStandardMaterial color="#111" metalness={0.9} roughness={0.1} />
-                        </mesh>
-                        <mesh position={[3.2, 0.8, 0]} scale={[1.5, 0.8, 2.8]}>
-                            <sphereGeometry args={[1, 32, 16]} />
-                            <meshStandardMaterial color={color} metalness={0.6} roughness={0.2} />
-                        </mesh>
-                        <group position={[-4.8, 2.0, 0]}>
-                             <mesh><boxGeometry args={[1.2, 0.1, 5.5]} /><meshStandardMaterial color={color} /></mesh>
-                             <mesh position={[0.2, -0.8, 1.8]} rotation={[0,0,-0.4]}><boxGeometry args={[0.8, 1.5, 0.2]} /><meshStandardMaterial color="#222" /></mesh>
-                             <mesh position={[0.2, -0.8, -1.8]} rotation={[0,0,-0.4]}><boxGeometry args={[0.8, 1.5, 0.2]} /><meshStandardMaterial color="#222" /></mesh>
-                        </group>
-                         <mesh position={[-4.5, 0.4, 0]}><boxGeometry args={[1, 0.4, 4]} /><meshStandardMaterial color="#111" /></mesh>
-                    </group>
+                <group position={[0, 0.5, 0]}>
+                    <primitive object={model} castShadow receiveShadow />
                 </group>
             );
+        };
+
+        const CarModel = ({ type, color = "#dc2626", customData }) => {
+            if (type === 'CUSTOM_OBJ' && customData?.obj) {
+                return <CustomCar objUrl={customData.obj} mtlUrl={customData.mtl} color={color} />;
+            }
+            return <StandardCar color={color} />;
         };
 
         const createTrackSpline = (chain, selectedLane, systemPieces, systemSpecs) => {
@@ -388,7 +491,7 @@
             return { curve, totalLength: splineLength, closed, points, map: normalizedMap };
         };
 
-        const AnimatedCar = ({ chain, throttle, isPlaying, selectedLane = 1, onLap, motor, tires, voltage, weight, onDerail, driveMode, onTelemetry, totalLaps, systemId }) => {
+        const AnimatedCar = ({ chain, throttle, isPlaying, isPaused, selectedLane = 1, onLap, motor, tires, voltage, weight, onDerail, driveMode, onTelemetry, totalLaps, systemId, resetToken, carModelId, customData, modelRotation }) => {
             const carRef = useRef();
             const [velocity, setVelocity] = useState(0);
             const [progress, setProgress] = useState(0);
@@ -399,15 +502,32 @@
             
             const systemSpecs = TRACK_SYSTEMS[systemId];
             const systemPieces = useMemo(() => getPieces(systemSpecs), [systemId]);
+            
+            // Determinar tipo de modelo
+            const allModels = [...CAR_MODELS];
+            // Si el carModelId no está en CAR_MODELS, asumimos que es importado y añadimos un dummy para que no falle la búsqueda
+            // Aunque en la App component ya pasamos customData, aquí solo necesitamos el 'type'
+            const currentModelType = carModelId.startsWith('custom-') ? 'CUSTOM_OBJ' : (allModels.find(c => c.id === carModelId)?.type || 'STD');
 
-            useEffect(() => { setVelocity(0); setProgress(0); setDerailed(false); lapTimeRef.current = 0; }, [chain, selectedLane, systemId]);
+            useEffect(() => { 
+                setVelocity(0); 
+                setProgress(0); 
+                setDerailed(false); 
+                lapTimeRef.current = 0; 
+            }, [chain, selectedLane, systemId, resetToken]);
 
             const trackSpline = useMemo(() => { if (chain.length === 0) return null; return createTrackSpline(chain, selectedLane, systemPieces, systemSpecs); }, [chain, selectedLane, systemPieces, systemSpecs]);
 
             useFrame((state, delta) => {
                 if (!trackSpline || !carRef.current) return;
                 
-                if (!isPlaying && !derailed) { setVelocity(0); return; }
+                if (!isPlaying && !derailed && !isPaused) { 
+                    setVelocity(0); return; 
+                }
+                
+                if (isPaused) {
+                    return;
+                }
 
                 if (derailed) {
                     carRef.current.position.addScaledVector(derailVector, delta * 30);
@@ -533,16 +653,25 @@
             return (
                 <group>
                     <group ref={carRef}>
-                        <CarModel color={selectedLane === 1 ? "#ef4444" : "#3b82f6"} />
+                        <group rotation={[0, modelRotation * Math.PI / 180, 0]}>
+                            <CarModel type={currentModelType} color={selectedLane === 1 ? "#ef4444" : "#3b82f6"} customData={customData} />
+                        </group>
+                        
                         {derailed && (<Text position={[0, 4, 0]} fontSize={2} color="yellow" rotation={[0, Math.PI/2, 0]}>!</Text>)}
-                        {driveMode === 'ai' && (<Text position={[0, 3, 0]} fontSize={1} color="#3b82f6" rotation={[0, Math.PI/2, 0]}>AI</Text>)}
+                        {driveMode === 'ai' && (<Text position={[0, 5, 0]} fontSize={1.5} color="#3b82f6" rotation={[0, Math.PI/2, 0]}>AI</Text>)}
                     </group>
-                    {trackSpline && (<Line points={trackSpline.curve.getPoints(2000)} color="yellow" lineWidth={3} position={[0, 0.5, 0]} />)}
                 </group>
             );
         };
+        
+        class ErrorBoundary extends React.Component {
+            constructor(props) { super(props); this.state = { hasError: false }; }
+            static getDerivedStateFromError(error) { return { hasError: true }; }
+            componentDidCatch(error, errorInfo) { console.error("Error cargando modelo:", error); }
+            render() { if (this.state.hasError) { return this.props.fallback; } return this.props.children; }
+        }
 
-        const DraggableBoard = React.forwardRef(({ width, length, enabled }, ref) => {
+        const DraggableBoard = React.forwardRef(({ width, length, enabled, onBoardClick, isPlacingTree }, ref) => {
             const { camera, raycaster, gl } = useThree();
             const [isDragging, setIsDragging] = useState(false);
             const dragPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), []);
@@ -551,11 +680,18 @@
             const boardGeometry = useMemo(() => new THREE.BoxGeometry(width, length, 1.2), [width, length]);
 
             const handlePointerDown = (e) => {
-                if (!enabled || !ref.current) return;
+                if (!enabled || !ref.current || isPlacingTree) return; // Disable drag if placing tree
                 e.stopPropagation();
                 offset.current.subVectors(ref.current.position, e.point);
                 setIsDragging(true);
                 gl.domElement.style.cursor = 'grabbing';
+            };
+            
+            const handleClick = (e) => {
+                if (isPlacingTree && onBoardClick) {
+                    e.stopPropagation();
+                    onBoardClick(e.point);
+                }
             };
 
             useEffect(() => {
@@ -576,15 +712,27 @@
             }, [isDragging, camera, raycaster, gl, dragPlane]);
 
             if (!width || !length) return null;
+            
+            // Cursor style for tree placement
+            const cursorStyle = isPlacingTree ? 'crosshair' : (enabled ? 'grab' : 'auto');
 
             return (
-                <mesh ref={ref} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.6, 0]} receiveShadow onPointerDown={handlePointerDown} geometry={boardGeometry}>
+                <mesh 
+                    ref={ref} 
+                    rotation={[-Math.PI / 2, 0, 0]} 
+                    position={[0, -0.6, 0]} 
+                    receiveShadow 
+                    onPointerDown={handlePointerDown} 
+                    onClick={handleClick}
+                    onPointerOver={() => { if(gl.domElement && isPlacingTree) gl.domElement.style.cursor = 'crosshair'; }}
+                    onPointerOut={() => { if(gl.domElement) gl.domElement.style.cursor = 'auto'; }}
+                    geometry={boardGeometry}
+                >
                     <meshStandardMaterial color={enabled ? "#16a34a" : "#15803d"} roughness={1} />
                     <lineSegments position={[0,0,0.61]} rotation={[0,0,0]}>
                         <edgesGeometry args={[boardGeometry]} />
                         <lineBasicMaterial color={enabled ? "#ffff00" : "#ffffff"} linewidth={2} opacity={0.3} transparent />
                     </lineSegments>
-                    {/* Add grid to make movement obvious */}
                     <gridHelper args={[Math.max(width, length), Math.max(width, length)/10]} rotation={[Math.PI/2, 0, 0]} position={[0,0,0.61]} material-opacity={0.1} material-transparent />
                 </mesh>
             );
@@ -685,9 +833,76 @@
                 else { const g = new THREE.ExtrudeGeometry(createCurveShape(def.r, def.ang, isLeft, width), {depth: TRACK_H, bevelEnabled:false, curveSegments:64}); const yOff = isLeft ? def.r : -def.r; g.translate(0, yOff, 0); g.rotateX(-Math.PI/2); return g; }
             }, [def, isLeft, width]);
             
+            // --- GUARDRAILS (VALLAS) ---
+            const fenceGeom = useMemo(() => {
+                if (!def || def.type !== 'CURVE') return null;
+                
+                const fenceHeight = 2.5; 
+                const fenceThickness = 0.3;
+                const outerRadius = def.r + width/2 + 0.5; 
+                
+                const shape = new THREE.Shape();
+                const start = isLeft ? -Math.PI/2 : Math.PI/2;
+                const rad = (def.ang * Math.PI)/180;
+                const end = isLeft ? start + rad : start - rad;
+                
+                shape.absarc(0, 0, outerRadius + fenceThickness, start, end, !isLeft);
+                shape.absarc(0, 0, outerRadius, end, start, isLeft);
+                
+                const g = new THREE.ExtrudeGeometry(shape, { depth: fenceHeight, bevelEnabled: false, curveSegments: 32 });
+                const yOff = isLeft ? def.r : -def.r; 
+                g.translate(0, yOff, 0); 
+                g.rotateX(-Math.PI/2);
+                return g;
+            }, [def, isLeft, width]);
+
             const trackMat = useMemo(() => new THREE.MeshStandardMaterial({ color: isSelected ? '#ef4444' : systemSpecs.color, roughness: 0.7, metalness: 0.1 }), [isSelected, systemSpecs.color]);
             const railMat = useMemo(() => new THREE.MeshStandardMaterial({ color: '#c0c0c0', metalness: 0.8, roughness: 0.3 }), []);
             
+            const fenceMat = useMemo(() => {
+                const canvas = document.createElement('canvas');
+                canvas.width = 512; canvas.height = 128; 
+                const ctx = canvas.getContext('2d');
+                
+                ctx.fillStyle = '#6b7280'; 
+                ctx.fillRect(0,0,512,128);
+                
+                ctx.fillStyle = '#374151'; 
+                ctx.fillRect(0,0,512,12);
+                ctx.fillRect(0,116,512,12);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '900 60px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                
+                ctx.shadowColor = 'rgba(0,0,0,0.6)';
+                ctx.shadowBlur = 4;
+                ctx.shadowOffsetX = 3;
+                ctx.shadowOffsetY = 3;
+                
+                const text = systemSpecs.name; 
+                ctx.fillText(text, 256, 64);
+                
+                const tex = new THREE.CanvasTexture(canvas);
+                tex.wrapS = THREE.RepeatWrapping;
+                tex.wrapT = THREE.RepeatWrapping;
+                
+                let repeatCount = 1;
+                if (def) {
+                    if (def.type === 'CURVE') {
+                         const arcLen = (def.ang * Math.PI / 180) * def.r;
+                         repeatCount = Math.max(1, arcLen / 35); 
+                    } else if (def.len) {
+                        repeatCount = Math.max(1, def.len / 35);
+                    }
+                }
+                
+                tex.repeat.set(repeatCount, 1);
+                
+                return new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6 });
+            }, [def, systemSpecs.name]);
+
             const rails = useMemo(() => {
                 if (!def) return null;
                 if(def.type === 'STRAIGHT') {
@@ -703,7 +918,20 @@
                 }
             }, [def, isLeft, railMat, railOffset, railGap]);
 
-            return (<group onClick={onClick}><mesh geometry={geom} receiveShadow castShadow material={trackMat}>{isSelected && <lineSegments><edgesGeometry args={[geom]} /><lineBasicMaterial color="#ffffff" /></lineSegments>}{def.isPower && (<group position={[def.len/2, 0, 0]}><mesh position={[0, TRACK_H+0.5, -(width/2 + 2)]}><boxGeometry args={[10, 1, 4]} /><meshStandardMaterial color="#dc2626" /></mesh><mesh position={[0, TRACK_H+1.1, -(width/2 + 2)]} rotation={[-Math.PI/2,0,0]}><planeGeometry args={[8, 3]} /><meshBasicMaterial color="#ef4444" /></mesh></group>)}{def.isHalf && (<mesh position={[0, TRACK_H+0.01, 0]} rotation={[-Math.PI/2,0,0]}><ringGeometry args={[def.r-0.5, def.r+0.5, 32, 1, isLeft?-Math.PI/2:Math.PI/2, (def.ang*Math.PI)/180 * (isLeft?1:-1)]} /><meshBasicMaterial color={def.col} opacity={0.5} transparent /></mesh>)}</mesh>{rails}<mesh position={[0, TRACK_H/2, 0]}><boxGeometry args={[0.2, TRACK_H, width-0.5]} /><meshBasicMaterial color="#000" /></mesh></group>);
+            return (
+                <group onClick={onClick}>
+                    <mesh geometry={geom} receiveShadow castShadow material={trackMat}>
+                        {isSelected && <lineSegments><edgesGeometry args={[geom]} /><lineBasicMaterial color="#ffffff" /></lineSegments>}
+                        {def.isPower && (<group position={[def.len/2, 0, 0]}><mesh position={[0, TRACK_H+0.5, -(width/2 + 2)]}><boxGeometry args={[10, 1, 4]} /><meshStandardMaterial color="#dc2626" /></mesh><mesh position={[0, TRACK_H+1.1, -(width/2 + 2)]} rotation={[-Math.PI/2,0,0]}><planeGeometry args={[8, 3]} /><meshBasicMaterial color="#ef4444" /></mesh></group>)}
+                        {def.isHalf && (<mesh position={[0, TRACK_H+0.01, 0]} rotation={[-Math.PI/2,0,0]}><ringGeometry args={[def.r-0.5, def.r+0.5, 32, 1, isLeft?-Math.PI/2:Math.PI/2, (def.ang*Math.PI)/180 * (isLeft?1:-1)]} /><meshBasicMaterial color={def.col} opacity={0.5} transparent /></mesh>)}
+                    </mesh>
+                    {rails}
+                    <mesh position={[0, TRACK_H/2, 0]}><boxGeometry args={[0.2, TRACK_H, width-0.5]} /><meshBasicMaterial color="#000" /></mesh>
+                    {fenceGeom && (
+                        <mesh geometry={fenceGeom} material={fenceMat} position={[0, 0, 0]} castShadow receiveShadow />
+                    )}
+                </group>
+            );
         };
 
         const SceneManager = ({ appMode, viewMode, onCaptureReady, boardRef, boardSize, setViewMode }) => {
@@ -775,9 +1003,12 @@
             const [boardSize, setBoardSize] = useState({ width: 0, length: 0 }); 
             const [inputSize, setInputSize] = useState({ width: '244', length: '122' });
             const [showBoardConfig, setShowBoardConfig] = useState(true);
-            const [moveMode, setMoveMode] = useState('none'); // 'none', 'board', 'track'
+            const [moveMode, setMoveMode] = useState('none'); 
             const boardRef = useRef();
             const fileInputRef = useRef();
+            
+            const objInputRef = useRef();
+            const mtlInputRef = useRef();
             
             const [showSetup, setShowSetup] = useState(false);
             const [isCrashed, setIsCrashed] = useState(false);
@@ -795,6 +1026,10 @@
             const [selectedLane, setSelectedLane] = useState(1); 
             const [selectedVoltage, setSelectedVoltage] = useState(12);
             const [carWeight, setCarWeight] = useState(85); 
+            const [carModelRotation, setCarModelRotation] = useState(0); 
+            
+            const [selectedCarModelId, setSelectedCarModelId] = useState('std');
+            const [customCars, setCustomCars] = useState([]); // ALMACÉN DE COCHES IMPORTADOS
 
             const [motors, setMotors] = useState(INITIAL_MOTORS);
             const [tires, setTires] = useState(INITIAL_TIRES);
@@ -804,10 +1039,11 @@
             const [driveMode, setDriveMode] = useState('ai'); 
             const [targetLaps, setTargetLaps] = useState(10);
             
-            const [raceState, setRaceState] = useState('idle');
+            const [raceState, setRaceState] = useState('idle'); 
             const [lightStep, setLightStep] = useState(0);
             const [raceData, setRaceData] = useState({ currentLap: 0, lastLapTime: 0, bestLap: 0, totalTime: 0, avgLap: 0 });
             const raceStartTime = useRef(0);
+            const [resetToken, setResetToken] = useState(0); 
             
             const [telemetry, setTelemetry] = useState({ speed: 0, limit: 100, section: 'STD', throttle: 0, gForce: 0, gripLimit: 0 });
 
@@ -816,6 +1052,43 @@
             const [nextDir, setNextDir] = useState(1);
             const [viewMode, setViewMode] = useState('editor'); 
             const [snapshotUrl, setSnapshotUrl] = useState(null);
+            
+            // --- CARGAR DATOS PERSISTENTES (IndexedDB) ---
+            useEffect(() => {
+                const loadPersistentData = async () => {
+                    try {
+                        // Cargar coches guardados con sus blobs
+                        const savedCars = await get('ninco-custom-cars');
+                        if (savedCars && Array.isArray(savedCars)) {
+                            // Hidratar: Recrear las URLs de los blobs
+                            const hydratedCars = savedCars.map(c => ({
+                                ...c,
+                                customData: {
+                                    // Si existe el blob almacenado, crear URL. Si no, dejar como estaba
+                                    obj: c.storage?.objBlob ? URL.createObjectURL(c.storage.objBlob) : null,
+                                    mtl: c.storage?.mtlBlob ? URL.createObjectURL(c.storage.mtlBlob) : null
+                                }
+                            }));
+                            setCustomCars(hydratedCars);
+                            if (hydratedCars.length > 0) {
+                                setSelectedCarModelId(hydratedCars[hydratedCars.length - 1].id);
+                            }
+                        }
+
+                        // Cargar Motores y Neumáticos
+                        const savedMotors = await get('ninco-motors');
+                        if (savedMotors) setMotors(savedMotors);
+
+                        const savedTires = await get('ninco-tires');
+                        if (savedTires) setTires(savedTires);
+
+                    } catch (err) {
+                        console.error("Error cargando datos persistentes:", err);
+                        // No bloquear la app si falla IDB
+                    }
+                };
+                loadPersistentData();
+            }, []);
             
             const systemSpecs = TRACK_SYSTEMS[currentSystem];
             const piecesDef = useMemo(() => getPieces(systemSpecs), [currentSystem]);
@@ -885,7 +1158,9 @@
                 setSegments([{ id: 1, pId: 'STD', dir: 1, type: 'START', pos: new THREE.Vector3(), rot: new THREE.Euler() }]); 
                 setSelId(1);
                 setShowBoardConfig(false); 
-                initAudio(); 
+                if (window.Tone) {
+                    initAudio().catch(e => console.log("Audio init failed or deferred", e));
+                }
             };
             const add = (pId) => { if(viewMode!=='editor') return; const newId = Date.now() + Math.random(); setSegments(prev => [...prev, { id: newId, pId, dir: nextDir, type: 'PIECE' }]); setSelId(newId); };
             const del = () => { if(viewMode!=='editor') return; const f = segments.filter(s => s.id !== selId); setSegments(f); if(f.length > 0) setSelId(f[f.length-1].id); };
@@ -902,7 +1177,7 @@
                     }
                 });
             };
-
+            
             const handlePieceClick = (e, id) => { 
                 if(viewMode!=='editor' || appMode !== 'builder' || moveMode === 'track') return; 
                 e.stopPropagation(); 
@@ -949,10 +1224,98 @@
                 });
             };
 
+            // --- GESTIÓN DE CARGA DE MODELOS 3D PERSISTENTES ---
+            
+            const allCars = useMemo(() => [...CAR_MODELS, ...customCars], [customCars]);
+            const activeCarData = useMemo(() => allCars.find(c => c.id === selectedCarModelId) || CAR_MODELS[0], [allCars, selectedCarModelId]);
+
+            const handleObjUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                // 1. Crear URL para uso inmediato
+                const url = URL.createObjectURL(file);
+                const name = file.name.split('.')[0].substring(0, 10); 
+                
+                // 2. Crear estructura del coche
+                const newCar = {
+                    id: `custom-${Date.now()}`,
+                    name: name,
+                    type: 'CUSTOM_OBJ',
+                    description: 'Importado',
+                    customData: { obj: url, mtl: null },
+                    storage: { objBlob: file, mtlBlob: null } // Guardar el archivo real
+                };
+                
+                // 3. Actualizar estado
+                setCustomCars(prev => {
+                    const updated = [...prev, newCar];
+                    // 4. Guardar en DB (asíncrono, no bloquea UI)
+                    set('ninco-custom-cars', updated).catch(err => console.error("Error guardando coche", err));
+                    return updated;
+                });
+                
+                setSelectedCarModelId(newCar.id);
+                speak("Coche importado");
+                e.target.value = '';
+            };
+
+            const handleMtlUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                const url = URL.createObjectURL(file);
+                
+                if (selectedCarModelId.startsWith('custom-')) {
+                    setCustomCars(prev => {
+                        const updated = prev.map(c => {
+                            if (c.id === selectedCarModelId) {
+                                return { 
+                                    ...c, 
+                                    customData: { ...c.customData, mtl: url },
+                                    storage: { ...c.storage, mtlBlob: file } // Guardar MTL también
+                                };
+                            }
+                            return c;
+                        });
+                        
+                        set('ninco-custom-cars', updated).catch(err => console.error("Error guardando textura", err));
+                        return updated;
+                    });
+                    speak("Textura aplicada");
+                } else {
+                    setConfirmModal({
+                        message: "Primero selecciona un coche importado (botón azul) para aplicarle la textura.",
+                        onConfirm: () => setConfirmModal(null),
+                        isAlert: true
+                    });
+                }
+                e.target.value = '';
+            };
+
             const startRaceSequence = () => {
                 initAudio();
                 setRaceState('countdown'); setLightStep(0); setRaceData({ currentLap: 0, lastLapTime: 0, bestLap: 0, totalTime: 0, avgLap: 0 }); speak("Semáforo en marcha");
             };
+            
+            const pauseRace = () => {
+                setRaceState('paused');
+                speak("Pausa");
+            };
+
+            const resumeRace = () => {
+                setRaceState('racing');
+                speak("Continuamos");
+            };
+
+            const restartRace = () => {
+                setRaceState('idle');
+                setCarThrottle(0);
+                setResetToken(prev => prev + 1); 
+                setRaceData({ currentLap: 0, lastLapTime: 0, bestLap: 0, totalTime: 0, avgLap: 0 });
+                speak("Vuelta a Inicio");
+            };
+
             const handleDerail = () => {
                 if (driveMode === 'ai') return; 
                 setIsCrashed(true); playCrashSound(); speak("Salida de pista", true); setCarThrottle(0);
@@ -963,16 +1326,38 @@
 
             const addMotor = () => {
                 const newMotor = { id: `custom-${Date.now()}`, name: 'Nuevo Motor', rpm: 20000, torque: 1.0, color: '#ffffff' };
-                setMotors([...motors, newMotor]);
+                const updated = [...motors, newMotor];
+                setMotors(updated);
                 setSelectedMotor(newMotor);
+                set('ninco-motors', updated); // Persistir
                 speak("Motor añadido");
             };
 
             const addTire = () => {
                 const newTire = { id: `custom-${Date.now()}`, name: 'Custom', grip: 1.0, color: '#ffffff', label: 'CUST' };
-                setTires([...tires, newTire]);
+                const updated = [...tires, newTire];
+                setTires(updated);
                 setSelectedTire(newTire);
+                set('ninco-tires', updated); // Persistir
                 speak("Neumático añadido");
+            };
+            
+            // Función auxiliar para borrar coches guardados
+            const clearSavedData = async () => {
+                setConfirmModal({
+                    message: "¿Borrar todos los coches y configuraciones personalizadas guardadas?",
+                    onConfirm: async () => {
+                        await set('ninco-custom-cars', []);
+                        await set('ninco-motors', INITIAL_MOTORS);
+                        await set('ninco-tires', INITIAL_TIRES);
+                        setCustomCars([]);
+                        setMotors(INITIAL_MOTORS);
+                        setTires(INITIAL_TIRES);
+                        setSelectedCarModelId('std');
+                        setConfirmModal(null);
+                        speak("Datos borrados");
+                    }
+                });
             };
 
             const saveCircuit = () => {
@@ -1012,6 +1397,7 @@
                             });
                             setSegments(restoredSegments);
                             setSelId(restoredSegments[0].id);
+                            
                             speak("Circuito cargado");
                         } else {
                             setConfirmModal({ message: "Formato de archivo no válido", onConfirm: () => setConfirmModal(null), isAlert: true });
@@ -1056,6 +1442,7 @@
 
             return (
                 <div className="flex flex-col h-full w-full">
+                    {/* ... existing header ... */}
                     <div className={systemSpecs.headerClass}>
                         <div className="flex flex-col items-center">
                             <span className="neon-title-blur text-2xl tracking-widest">{systemSpecs.name} MANAGER</span>
@@ -1153,7 +1540,6 @@
                                             >
                                                 <group rotation={s.rot}>
                                                     <TrackMesh def={piecesDef[s.pId]} isLeft={s.dir === 1} isSelected={selId === s.id && viewMode==='editor' && appMode === 'builder'} onClick={(e) => handlePieceClick(e, s.id)} systemSpecs={systemSpecs} />
-                                                    {/* --- AÑADIDO: LÍNEA DE META --- */}
                                                     <FinishLine width={systemSpecs.width} />
                                                 </group>
                                             </StartPieceHandler>
@@ -1167,11 +1553,16 @@
                                 })}
 
                                 {viewMode==='editor' && appMode === 'builder' && (<group position={new THREE.Vector3().setFromMatrixPosition(pointerMatrix)} quaternion={new THREE.Quaternion().setFromRotationMatrix(pointerMatrix)}><mesh position={[0,1,0]}><coneGeometry args={[1, 2, 8]} /><meshBasicMaterial color="#22c55e" /></mesh></group>)}
+                                
                                 {carEnabled && chain.length > 0 && viewMode === 'editor' && (
                                     <AnimatedCar 
-                                        chain={chain} throttle={carThrottle} isPlaying={raceState === 'racing'} 
+                                        chain={chain} throttle={carThrottle} isPlaying={raceState === 'racing'} isPaused={raceState === 'paused'}
                                         selectedLane={selectedLane} onLap={handleLap} motor={selectedMotor} tires={selectedTire}
                                         voltage={selectedVoltage} weight={carWeight} onDerail={handleDerail} driveMode={driveMode} onTelemetry={handleTelemetry} totalLaps={targetLaps} systemId={currentSystem}
+                                        resetToken={resetToken}
+                                        carModelId={selectedCarModelId}
+                                        customData={activeCarData?.customData}
+                                        modelRotation={carModelRotation}
                                     />
                                 )}
                             </group>
@@ -1182,6 +1573,7 @@
                         {carEnabled && viewMode === 'editor' && appMode === 'racer' && (
                             <>
                                 <div className="absolute top-[52px] left-0 w-full flex flex-col z-40 p-2 items-center">
+                                    {/* ... existing hud overlay ... */}
                                     <div className="flex justify-between items-stretch gap-0 neon-panel-full p-0 rounded-xl overflow-hidden w-full max-w-4xl shadow-2xl">
                                         <div className="flex flex-col flex-1 min-w-[200px] p-3 bg-gradient-to-r from-slate-900/80 to-transparent">
                                             <div className="flex items-center gap-2 mb-3 border-b border-cyan-500/30 pb-1">
@@ -1276,9 +1668,40 @@
                                                 <button onClick={toggleDriveMode} className={`flex-1 py-1 rounded text-[9px] font-bold uppercase transition border ${driveMode === 'ai' ? 'bg-blue-600 border-blue-400 text-white' : 'bg-transparent border-slate-600 text-slate-400'}`}>
                                                     {driveMode}
                                                 </button>
-                                                <button onClick={startRaceSequence} disabled={raceState === 'countdown' || raceState === 'racing'} className={`flex items-center justify-center px-3 rounded text-white transition shadow-lg ${raceState === 'racing' ? 'bg-slate-700' : 'bg-green-600 hover:bg-green-500'}`}>
-                                                    {raceState === 'racing' ? <StopCircle size={14}/> : <Play size={14}/>}
-                                                </button>
+                                                
+                                                <div className="flex gap-1 flex-1">
+                                                    {raceState === 'countdown' ? (
+                                                        <button disabled className="flex items-center justify-center px-4 py-1 rounded text-white/50 font-black text-xs transition bg-slate-800 border border-slate-700 uppercase tracking-tight w-full cursor-not-allowed">
+                                                            PREPARADOS...
+                                                        </button>
+                                                    ) : (
+                                                        <>
+                                                            {(raceState === 'idle' || raceState === 'finished') && (
+                                                                <button onClick={startRaceSequence} className="flex items-center justify-center px-4 py-1 rounded text-white font-black text-xs transition shadow-lg bg-green-600 hover:bg-green-500 border border-green-700 uppercase tracking-tight flex-1" title="Iniciar Carrera">
+                                                                    INICIAR
+                                                                </button>
+                                                            )}
+
+                                                            {raceState === 'racing' && (
+                                                                <button onClick={pauseRace} className="flex items-center justify-center px-4 py-1 rounded text-white font-black text-xs transition shadow-lg bg-orange-600 hover:bg-orange-500 border border-orange-700 uppercase tracking-tight flex-1" title="Pausar">
+                                                                    <Pause size={14} className="mr-1"/> PAUSA
+                                                                </button>
+                                                            )}
+
+                                                            {raceState === 'paused' && (
+                                                                <>
+                                                                    <button onClick={resumeRace} className="flex items-center justify-center px-2 py-1 rounded text-white font-black text-[10px] transition shadow-lg bg-blue-600 hover:bg-blue-500 border border-blue-700 uppercase tracking-tight flex-1" title="Continuar">
+                                                                        <Play size={12} className="mr-1"/> SEGUIR
+                                                                    </button>
+                                                                    <button onClick={restartRace} className="flex items-center justify-center px-2 py-1 rounded text-white font-black text-[10px] transition shadow-lg bg-red-600 hover:bg-red-500 border border-red-700 uppercase tracking-tight flex-1" title="Reiniciar">
+                                                                        <RotateCcw size={12} className="mr-1"/> REINICIAR
+                                                                    </button>
+                                                                </>
+                                                            )}
+                                                        </>
+                                                    )}
+                                                </div>
+
                                                 <button onClick={() => setShowSetup(!showSetup)} className="p-1.5 rounded border border-slate-600 text-slate-400 hover:text-white hover:bg-slate-700"><Settings2 size={14}/></button>
                                             </div>
                                         </div>
@@ -1290,7 +1713,62 @@
                                         <div className="pointer-events-auto bg-slate-900/95 border-t border-slate-700 backdrop-blur-md pb-safe animate-slide-up transition-all">
                                             <div className="flex justify-between items-center px-3 py-1 bg-slate-800 border-b border-slate-700">
                                                 <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Taller & Setup</span>
-                                                <button onClick={()=>setShowSetup(false)}><X size={14} className="text-slate-400 hover:text-white"/></button>
+                                                <div className="flex items-center gap-2">
+                                                    <button onClick={clearSavedData} className="text-[9px] font-bold text-red-400 hover:text-red-300 uppercase flex items-center gap-1"><Database size={10}/> Borrar Datos</button>
+                                                    <button onClick={()=>setShowSetup(false)}><X size={14} className="text-slate-400 hover:text-white"/></button>
+                                                </div>
+                                            </div>
+
+                                            <div className="px-2 py-2 border-b border-slate-800">
+                                                <div className="flex justify-between items-end mb-1 px-1">
+                                                    <span className="text-[9px] font-bold text-slate-500 uppercase">Modelo de Coche</span>
+                                                </div>
+                                                <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide snap-x items-center">
+                                                    {allCars.map(car => (
+                                                        <button key={car.id} onClick={() => setSelectedCarModelId(car.id)} className={`snap-start min-w-[90px] p-2 rounded border flex flex-col items-center justify-center gap-1 transition relative overflow-hidden ${selectedCarModelId === car.id ? 'bg-slate-800 border-cyan-500 ring-1 ring-cyan-500/50' : 'border-slate-700 bg-slate-800/50 hover:bg-slate-800'}`}>
+                                                            {car.id.startsWith('custom-') && <div className="absolute top-0 right-0 bg-blue-500 text-white text-[6px] font-black px-1">IMP</div>}
+                                                            <div className="w-12 h-6 bg-gradient-to-r from-gray-700 to-gray-600 rounded flex items-center justify-center text-[8px] font-bold text-white shadow-sm">
+                                                                {car.type === 'TRUCK' ? <Truck size={12}/> : (car.type === 'CUSTOM_OBJ' ? <FileBox size={12}/> : (car.type === 'CLASSIC' ? <History size={12}/> : (car.type === 'CUSTOM' ? <Upload size={12}/> : car.type)))}
+                                                            </div>
+                                                            <span className="text-[9px] font-bold text-slate-300 whitespace-nowrap">{car.name}</span>
+                                                            <span className="text-[8px] text-slate-500 text-center leading-tight">{car.description || 'Importado'}</span>
+                                                        </button>
+                                                    ))}
+                                                    
+                                                    <div className="flex flex-col gap-1 ml-2 border-l border-slate-700 pl-2">
+                                                        <input type="file" ref={objInputRef} onChange={handleObjUpload} accept=".obj" className="hidden" />
+                                                        <button onClick={() => objInputRef.current.click()} className="flex items-center gap-1 px-2 py-1 bg-blue-700 hover:bg-blue-600 rounded text-[9px] font-bold text-white transition whitespace-nowrap">
+                                                            <Plus size={10} /> NUEVO COCHE (OBJ)
+                                                        </button>
+                                                        
+                                                        <input type="file" ref={mtlInputRef} onChange={handleMtlUpload} accept=".mtl" className="hidden" />
+                                                        <button onClick={() => mtlInputRef.current.click()} className="flex items-center gap-1 px-2 py-1 bg-slate-700 hover:bg-slate-600 rounded text-[9px] font-bold text-white transition whitespace-nowrap">
+                                                            <Upload size={10} /> TEXTURA (MTL)
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* --- ROTACIÓN MANUAL DEL MODELO --- */}
+                                            <div className="px-3 py-2 border-b border-slate-800 flex items-center gap-4 bg-slate-900/50">
+                                                <div className="flex flex-col flex-1">
+                                                    <div className="flex justify-between items-center mb-1">
+                                                        <span className="text-[9px] font-bold text-slate-400 uppercase flex items-center gap-1"><RotateCw size={10}/> ROTACIÓN MODELO 3D</span>
+                                                        <span className="text-[9px] font-mono text-cyan-400">{carModelRotation}°</span>
+                                                    </div>
+                                                    <input 
+                                                        type="range" min="0" max="360" step="5" 
+                                                        value={carModelRotation} 
+                                                        onChange={(e) => setCarModelRotation(parseInt(e.target.value))}
+                                                        className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                                                    />
+                                                </div>
+                                                <button 
+                                                    onClick={() => setCarModelRotation(prev => (prev + 180) % 360)} 
+                                                    className="px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-[9px] font-bold text-white transition border border-slate-600 shadow-sm"
+                                                >
+                                                    GIRAR 180°
+                                                </button>
                                             </div>
 
                                             <div className="px-2 py-2 border-b border-slate-800">
@@ -1347,13 +1825,14 @@
                                     )}
 
                                     <div className="pointer-events-auto bg-black/80 backdrop-blur border-t border-slate-700 p-2 pb-safe flex gap-3 items-center">
-                                        <div className="flex items-center gap-2 flex-1 h-10">
+                                        {/* ... existing controls ... */}
+                                        <div className="flex items-center gap-2 flex-1 h-14">
                                             <button 
                                                 onClick={() => !isCrashed && driveMode === 'manual' && setCarThrottle(t => Math.max(0, parseFloat((t - 0.1).toFixed(1))))} 
                                                 disabled={driveMode === 'ai'} 
-                                                className="w-12 h-full rounded bg-slate-800 hover:bg-slate-700 text-white z-30 flex items-center justify-center border border-slate-600 font-bold active:scale-95 transition shadow-lg"
+                                                className="w-14 h-full rounded bg-slate-800 hover:bg-slate-700 text-white z-30 flex items-center justify-center border border-slate-600 font-bold active:scale-95 transition shadow-lg"
                                             >
-                                                <Minus size={20} />
+                                                <Minus size={24} />
                                             </button>
                                             
                                             <div className="flex-1 h-full bg-slate-900 rounded-lg border border-slate-700 relative overflow-hidden mx-1">
@@ -1371,8 +1850,8 @@
                                                 />
                                                 
                                                 <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-10">
-                                                    <span className="text-[7px] font-bold text-slate-400 uppercase leading-none mb-0.5">THROTTLE</span>
-                                                    <span className={`text-lg font-black leading-none ${driveMode === 'ai' ? 'text-blue-400' : 'text-orange-400'}`}>
+                                                    <span className="text-[9px] font-bold text-slate-400 uppercase leading-none mb-1">THROTTLE</span>
+                                                    <span className={`text-2xl font-black leading-none ${driveMode === 'ai' ? 'text-blue-400' : 'text-orange-400'}`}>
                                                         {driveMode === 'ai' ? 'AUTO' : `${(carThrottle * 100).toFixed(0)}%`}
                                                     </span>
                                                 </div>
@@ -1381,23 +1860,24 @@
                                             <button 
                                                 onClick={() => !isCrashed && driveMode === 'manual' && setCarThrottle(t => Math.min(1, parseFloat((t + 0.1).toFixed(1))))} 
                                                 disabled={driveMode === 'ai'} 
-                                                className="w-12 h-full rounded bg-slate-800 hover:bg-slate-700 text-white z-30 flex items-center justify-center border border-slate-600 font-bold active:scale-95 transition shadow-lg"
+                                                className="w-14 h-full rounded bg-slate-800 hover:bg-slate-700 text-white z-30 flex items-center justify-center border border-slate-600 font-bold active:scale-95 transition shadow-lg"
                                             >
-                                                <Plus size={20} />
+                                                <Plus size={24} />
                                             </button>
                                         </div>
                                         
-                                        <div className="flex flex-col gap-1 bg-slate-900 rounded p-1 border border-slate-800 h-10 justify-center">
-                                            <button onClick={() => { setSelectedLane(1); speak("Carril 1"); }} className={`w-8 h-3.5 text-[8px] font-bold rounded flex items-center justify-center transition ${selectedLane === 1 ? 'bg-red-600 text-white shadow-lg' : 'bg-slate-800 text-slate-500'}`}>L1</button>
-                                            <button onClick={() => { setSelectedLane(2); speak("Carril 2"); }} className={`w-8 h-3.5 text-[8px] font-bold rounded flex items-center justify-center transition ${selectedLane === 2 ? 'bg-blue-600 text-white shadow-lg' : 'bg-slate-800 text-slate-500'}`}>L2</button>
+                                        <div className="flex flex-col gap-1 bg-slate-900 rounded p-1 border border-slate-800 h-14 w-16 justify-center">
+                                            <button onClick={() => { setSelectedLane(1); speak("Carril 1"); }} className={`flex-1 w-full text-[10px] font-bold rounded flex items-center justify-center transition ${selectedLane === 1 ? 'bg-red-600 text-white shadow-lg ring-1 ring-red-400' : 'bg-slate-800 text-slate-500 hover:bg-slate-700'}`}>L1</button>
+                                            <button onClick={() => { setSelectedLane(2); speak("Carril 2"); }} className={`flex-1 w-full text-[10px] font-bold rounded flex items-center justify-center transition ${selectedLane === 2 ? 'bg-blue-600 text-white shadow-lg ring-1 ring-blue-400' : 'bg-slate-800 text-slate-500 hover:bg-slate-700'}`}>L2</button>
                                         </div>
                                     </div>
                                 </div>
                             </>
                         )}
+                        {/* ... existing builder tools ... */}
                         {viewMode==='editor' && appMode === 'builder' && boardSize.width > 0 && (
-                            <div className="absolute top-4 left-4 flex flex-col gap-1 bg-slate-900/95 p-1.5 rounded-lg border border-slate-700 z-50 shadow-xl">
-                                <div className="text-[9px] font-bold text-slate-500 uppercase px-1 mb-1 tracking-wider border-b border-slate-800 pb-1">Herramienta Mover</div>
+                            <div className="absolute top-4 left-4 flex flex-col gap-1 bg-slate-900/95 p-1.5 rounded-lg border border-slate-700 z-50 shadow-xl pointer-events-auto">
+                                <div className="text-[9px] font-bold text-slate-500 uppercase px-1 mb-1 tracking-wider border-b border-slate-800 pb-1">Herramientas</div>
                                 <div className="flex flex-col gap-1">
                                     <button 
                                         onClick={() => setMoveMode(m => m === 'board' ? 'none' : 'board')} 
@@ -1430,27 +1910,29 @@
                         )}
                     </div>
 
+                    {/* ... existing hud ... */}
                     {viewMode === 'editor' && (
                         <div className={`hud ${appMode === 'racer' ? 'hidden-hud' : ''}`}>
                             <div className="flex flex-wrap justify-center items-center gap-2 w-full">
-                                <div className="flex gap-2 shrink-0"><button onClick={()=>add('STD')} className="btn-tile" title="Recta Standard"><div className="icon-straight w-6 h-2"></div><span className="btn-label">STD</span></button><button onClick={()=>add('CONEX')} className="btn-tile" title="Recta Conexiones"><div className="icon-power"></div><span className="btn-label text-red-400">POW</span></button><button onClick={()=>add('HALF')} className="btn-tile" title="Media Recta"><div className="icon-straight w-3 h-2"></div><span className="btn-label">1/2</span></button><button onClick={()=>add('QTR')} className="btn-tile" title="Cuarto de Recta"><div className="icon-straight w-2 h-2"></div><span className="btn-label">1/4</span></button></div>
+                                <div className="flex gap-2 shrink-0 overflow-x-auto"><button onClick={()=>add('STD')} className="btn-tile" title="Recta Standard"><div className="icon-straight w-6 h-2"></div><span className="btn-label">STD</span></button><button onClick={()=>add('CONEX')} className="btn-tile" title="Recta Conexiones"><div className="icon-power"></div><span className="btn-label text-red-400">POW</span></button><button onClick={()=>add('HALF')} className="btn-tile" title="Media Recta"><div className="icon-straight w-3 h-2"></div><span className="btn-label">1/2</span></button><button onClick={()=>add('QTR')} className="btn-tile" title="Cuarto de Recta"><div className="icon-straight w-2 h-2"></div><span className="btn-label">1/4</span></button></div>
                                 <div className="flex gap-2 shrink-0 border-l border-r border-slate-600 px-2 mx-1"><button onClick={()=>add('XO')} className="btn-tile" title="Cruce"><div className="icon-cross"></div><span className="btn-label text-slate-300">CR</span></button></div>
-                                <div className="flex gap-2 shrink-0">
+                                <div className="flex gap-2 shrink-0 overflow-x-auto">
                                     <button onClick={()=>setNextDir(d => d*-1)} className="btn-tile" title="Cambiar dirección siguiente"><ArrowLeftRight size={20} className={nextDir===1?'text-indigo-400':'text-orange-400'}/></button>
                                     <button onClick={flip} className="btn-tile" title="Girar Pieza Seleccionada"><RotateCw size={20} /></button>
                                     <button onClick={del} className="btn-tile border-red-900/50 text-red-400 hover:bg-red-900/20 hover:border-red-500" title="Borrar Seleccionada"><Trash2 size={20} /></button>
                                     <button onClick={undo} className="btn-tile text-yellow-500 hover:text-yellow-400" title="Deshacer Última"><Undo2 size={20} /></button>
                                 </div>
                             </div>
-                            <div className="flex flex-wrap justify-center items-center gap-2 w-full">
+                            <div className="flex flex-wrap justify-center items-center gap-2 w-full mt-2 overflow-x-auto pb-1">
                                 <div className="flex gap-1 shrink-0"><button onClick={()=>add('R1')} className="btn-tile group"><div className="icon-curve r1-css"></div><span className="btn-label text-red-500">R1</span></button><button onClick={()=>add('R1H')} className="btn-tile group w-10"><div className="icon-curve r1-css scale-75 origin-top-left"></div><span className="btn-label text-red-400">½</span></button></div>
                                 <div className="flex gap-1 shrink-0"><button onClick={()=>add('R2')} className="btn-tile group"><div className="icon-curve r2-css"></div><span className="btn-label text-green-500">R2</span></button><button onClick={()=>add('R2H')} className="btn-tile group w-10"><div className="icon-curve r2-css scale-75 origin-top-left"></div><span className="btn-label text-green-400">½</span></button></div>
                                 <button onClick={()=>add('R3')} className="btn-tile group shrink-0"><div className="icon-curve r3-css"></div><span className="btn-label text-yellow-500">R3</span></button>
                                 <button onClick={()=>add('R4')} className="btn-tile group shrink-0"><div className="icon-curve r4-css"></div><span className="btn-label text-blue-500">R4</span></button>
                                 <button onClick={()=>add('R5')} className="btn-tile group shrink-0"><div className="icon-curve r5-css"></div><span className="btn-label text-indigo-500">R5</span></button>
                             </div>
-                            <div className="flex flex-wrap justify-center items-center gap-4 w-full pt-1 border-t border-slate-700 mt-1">
-                                <div className="flex gap-2 items-center">
+                            
+                            <div className="flex flex-wrap justify-center items-center gap-4 w-full pt-1 border-t border-slate-700 mt-1 overflow-x-auto pb-safe">
+                                <div className="flex gap-2 items-center shrink-0">
                                     <button onClick={()=>setShowBoardConfig(true)} className="p-2 bg-slate-800 rounded border border-slate-600 hover:bg-slate-700 text-slate-400 hover:text-white transition shadow"><Ruler size={18}/></button>
                                     
                                     {isSelectionStart && moveMode === 'none' && (
@@ -1462,14 +1944,15 @@
                                         </div>
                                     )}
 
-                                    <div className="flex gap-2 px-2 border-l border-r border-slate-600">
+                                    <div className="flex gap-2 px-2 border-l border-r border-slate-600 shrink-0">
                                         <button onClick={()=>spawnParallel('left')} className="btn-new-circuit" title="Crear circuito paralelo a la IZQUIERDA"><CopyPlus size={20} /><span>+ PARALELA IZQ</span></button>
                                         <button onClick={()=>spawnParallel('right')} className="btn-new-circuit" title="Crear circuito paralelo a la DERECHA"><CopyPlus size={20} /><span>+ PARALELA DER</span></button>
                                     </div>
+
                                     <button onClick={()=>setViewMode('reset_view')} className="p-2 bg-indigo-900 rounded border border-indigo-600 hover:bg-indigo-700 text-indigo-200 hover:text-white transition shadow flex gap-2 font-bold items-center" title="Volver al Centro"><Home size={18}/></button>
                                     <button onClick={reset} className="p-2 bg-slate-900 rounded border border-slate-700 hover:bg-red-900 text-slate-500 hover:text-white transition shadow" title="Reiniciar"><RotateCcw size={18}/></button>
                                 </div>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 shrink-0">
                                     <input type="file" ref={fileInputRef} onChange={loadCircuit} accept=".json" style={{display:'none'}} />
                                     <button onClick={()=>fileInputRef.current.click()} className="p-2 bg-slate-700 hover:bg-slate-600 text-white rounded shadow border-b-2 border-slate-900 active:border-b-0 active:translate-y-0.5" title="Cargar Circuito"><FolderOpen size={18}/></button>
                                     <button onClick={saveCircuit} className="p-2 bg-green-700 hover:bg-green-600 text-white rounded shadow border-b-2 border-green-900 active:border-b-0 active:translate-y-0.5" title="Guardar Circuito"><Save size={18}/></button>
