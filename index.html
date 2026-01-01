@@ -854,7 +854,18 @@
                                             <button onClick={() => { setSelectedLane(4); speak("Carril 4"); }} className={`btn-tile ${selectedLane === 4 ? 'active-tool' : ''}`}><span className="text-xl font-black">L4</span></button>
                                         </div>
                                         <button onClick={toggleDriveMode} className={`btn-tile w-full mt-2 flex-row gap-2 ${driveMode === 'ai' ? 'border-blue-500 text-blue-400' : ''}`}><Bot size={18} /><span className="btn-label mt-0">{driveMode === 'ai' ? 'PILOTO AUTOMÁTICO (IA)' : 'CONTROL MANUAL'}</span></button>
-                            </div>
+                                        
+                                        <div className="flex items-center justify-between mt-2 bg-slate-900/40 p-2 rounded border border-slate-800">
+                                            <div className="flex items-center gap-2">
+                                                <Zap size={14} className={selectedVoltage === 14 ? "text-yellow-400" : "text-blue-400"} />
+                                                <span className="text-[9px] font-bold text-slate-400 uppercase">Voltaje Pista</span>
+                                            </div>
+                                            <div className="flex gap-1">
+                                                <button onClick={() => { setSelectedVoltage(12); speak("12 Voltios"); }} className={`px-3 py-1.5 rounded text-[9px] font-bold border transition ${selectedVoltage === 12 ? 'bg-blue-900/50 border-blue-500 text-blue-100 shadow-[0_0_10px_rgba(59,130,246,0.3)]' : 'bg-slate-800 border-slate-700 text-slate-500 hover:bg-slate-700'}`}>12V</button>
+                                                <button onClick={() => { setSelectedVoltage(14); speak("14 Voltios"); }} className={`px-3 py-1.5 rounded text-[9px] font-bold border transition ${selectedVoltage === 14 ? 'bg-yellow-900/50 border-yellow-500 text-yellow-100 shadow-[0_0_10px_rgba(234,179,8,0.3)]' : 'bg-slate-800 border-slate-700 text-slate-500 hover:bg-slate-700'}`}>14V</button>
+                                            </div>
+                                        </div>
+                                    </div>
 
                             {/* SECCIÓN GARAJE COCHES AÑADIDA */}
                             {customCars.length > 0 && (
